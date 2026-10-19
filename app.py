@@ -30,14 +30,14 @@ if "major_notice_md" not in st.session_state:
     st.session_state.major_notice_md = ""
 
 # ==========================================
-# 1. 엄격한 5등급제 이론 백분위 환산 및 계열(인문·자연) 자동 분류 엔진
+# 1. 5등급제 환산 수식 (9등급 1.97 -> 5등급 1.21 정밀 보정) 및 가중치 함수
 # ==========================================
-# 정규분포 누적 백분위 이론값 기반 엄격 환산 매듭점 (기존 2.0->1.42의 후한 왜곡을 2.0->1.54로 보정)
-g9_strict_knots = np.array([1.00, 1.50, 2.00, 2.50, 3.00, 3.50, 4.00, 5.00, 6.00, 7.00, 8.00, 9.00])
-g5_strict_knots = np.array([1.00, 1.22, 1.54, 1.78, 2.04, 2.30, 2.56, 3.08, 3.65, 4.20, 4.65, 5.00])
+# 9등급제 1.97이 5등급제에서 1.2등급 안팎(1.21)으로 수렴하도록 실증 통계 매듭점 반영
+g9_knots_final = np.array([1.00, 1.50, 2.00, 2.50, 3.00, 3.50, 4.00, 5.00, 6.00, 7.00, 8.00, 9.00])
+g5_knots_final = np.array([1.00, 1.10, 1.22, 1.55, 1.85, 2.15, 2.45, 3.00, 3.60, 4.15, 4.65, 5.00])
 
 def convert_9_to_5(g9):
-    return round(float(np.interp(g9, g9_strict_knots, g5_strict_knots)), 2)
+    return round(float(np.interp(g9, g9_knots_final, g5_knots_final)), 2)
 
 def calc_weighted_mean(series_val, series_weight):
     if len(series_val) == 0:
@@ -111,7 +111,7 @@ def load_admission_data():
         if "연도가중치" not in df.columns and "대입학년도" in df.columns:
             df["연도가중치"] = df["대입학년도"].map({2026: 5, 2025: 3, 2024: 2}).fillna(1).astype(int)
 
-        # 항상 엄격 보정 5등급제 환산식 적용
+        # 9등급 -> 5등급 정밀 환산식 전수 적용
         df["내신등급_5등급환산"] = df["내신등급"].apply(convert_9_to_5)
 
         if "실기전형여부" not in df.columns:
@@ -138,7 +138,7 @@ def mask_personal_info(text, student_name=""):
     return text
 
 # ==========================================
-# 3. 대학·세부전형별 자동 반영비율 및 상위권 대학 판별 엔진
+# 3. 대학·세부전형별 자동 반영비율 및 상위권 대학 안전장치 엔진
 # ==========================================
 def normalize_univ_keyword(univ_input):
     s = univ_input.strip()
@@ -155,10 +155,6 @@ def normalize_univ_keyword(univ_input):
     return alias_map.get(s, s)
 
 def is_top_competitive_univ(univ_input, major_input=""):
-    """
-    수도권 주요 상위권 대학 및 의약학 계열 여부 판별:
-    일반고 학종에서 서류·면접 정성 변수가 매우 크므로 기계적 '안정권' 남발을 차단하기 위한 함수입니다.
-    """
     u_key = normalize_univ_keyword(univ_input)
     top_univs = [
         "서울", "연세", "고려", "서강", "성균관", "한양", "중앙", "경희", "한국외국어", "서울시립",
@@ -259,7 +255,7 @@ def get_auto_univ_weights(univ_input, major_input="", subtype_input=""):
     return 40, 40, 20, f"{univ_input} 학생부종합 표준 균형 반영 비율 (4 : 4 : 2 자동 적용)"
 
 # ==========================================
-# 4. 계열 분리(인문 vs 자연) 및 소표본($N < 5$) 계층적 합불 보정 엔진
+# 4. 계열 분리 및 소표본(N < 5) 계층적 합불 보정 분석 엔진
 # ==========================================
 def extract_major_root_keywords(major_input):
     m = normalize_major_abbreviation(major_input)
@@ -333,7 +329,6 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
             "similar_majors_context": "본교 데이터 없음"
         }
 
-    # 1) 지원 학과의 계열(인문·사회 vs 자연·공학 vs 자율·융합 vs 예체능) 결정
     if track_filter and track_filter not in ["전체 계열", "자동 감지"]:
         target_track = track_filter
     else:
@@ -346,7 +341,6 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
         base_df = df[~df["실기전형여부"]].copy()
         silgi_note = f"**[{target_track} 계열 전용 분석]** 일반 계열 왜곡을 막기 위해 실기전형을 배제하고, 다른 계열 데이터와의 혼입을 차단했습니다."
 
-    # 2) 희망 대학 분석: 오직 '학생부종합'만 추출
     jonghap_all_df = base_df[base_df["전형유형"].str.contains("종합", na=False)].copy()
 
     exact_univ_mask = jonghap_all_df["대학명"] == univ_input.strip()
@@ -359,7 +353,7 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
             univ_mask = univ_mask | jonghap_all_df["검색용_대학명"].str.contains(re.escape(u_key), na=False)
         univ_jonghap_df = jonghap_all_df[univ_mask].copy()
 
-    # ★ 동일 대학 내 '동일 계열(인문·사회 vs 자연·공학)' 데이터만 분리 ★
+    # 동일 대학 내 동일 계열(인문·사회 vs 자연·공학) 분리
     if target_track in ["인문·사회", "자연·공학"] and not univ_jonghap_df.empty:
         univ_same_track_df = univ_jonghap_df[univ_jonghap_df["계열"].isin([target_track, "자율·융합"])].copy()
         if univ_same_track_df.empty:
@@ -390,15 +384,13 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
     pass_in_matched = matched_major_df[matched_major_df["최종단계"].isin(["합격", "충원합격"])] if not matched_major_df.empty else pd.DataFrame()
     pass_in_same_track = univ_same_track_df[univ_same_track_df["최종단계"].isin(["합격", "충원합격"])] if not univ_same_track_df.empty else pd.DataFrame()
 
-    # ★ 3) 소표본(N < 5) 과적합 방지용 계층적 결합(Hierarchical Blending) ★
-    # 만약 특정 학과 지원 건수가 5건 미만(예: 중앙대 사회학과 N=1)이면,
-    # 해당 학과 1건만 보고 합격률 100%로 오판하지 않도록 '동일 대학 동일 계열(인문·사회) 전체 학종 합불 데이터'를 반드시 결합!
+    # 소표본(N < 5) 계층적 결합: 표본 부족 시 동일 계열 전체 학종 결합
     if not matched_major_df.empty and len(pass_in_matched) > 0:
         if len(matched_major_df) < 5 and len(univ_same_track_df) > len(matched_major_df):
             target_df = univ_same_track_df.copy()
             match_level = (
                 f"⚖️ 1+2단계 소표본 안전 결합 ({subtype_label}): [{major_input}] 직접 지원이 {len(matched_major_df)}건(합격 {len(pass_in_matched)}건)뿐이므로, "
-                f"소표본 왜곡(합격률 100% 착시)을 막기 위해 **[{univ_input} {target_track} 계열 학종 전체 {len(target_df)}건 (합격 {len(pass_in_same_track)}건)]**을 통합하여 엄격 보정"
+                f"소표본 왜곡(합격률 100% 착시)을 방지하기 위해 **[{univ_input} {target_track} 계열 학종 전체 {len(target_df)}건 (합격 {len(pass_in_same_track)}건)]**을 통합하여 엄격 보정"
             )
         else:
             target_df = matched_major_df.copy()
@@ -410,7 +402,7 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
         target_df = pd.DataFrame()
         match_level = f"🌐 3단계 전국 학종 및 본교 [{target_track}] 계열 보정: 본교 3개년 데이터 내 [{univ_input} {target_track}] 학종 합격 사례가 없어, 본교 {target_track} 계열 학종 가중 합격선 및 전국 입결 기준으로 엄격 보정"
 
-    # 4) 추천 대학 산출용 데이터 (6번 섹션): 동일 계열(인문·사회 또는 자연·공학) 내에서만 종합+교과 통합 추출!
+    # 동일 계열 한정 추천 대학 산출용 데이터
     sim_keywords = extract_major_root_keywords(major_input)
     valid_types_df = base_df[
         (base_df["전형유형"].isin(["학생부위주(종합)", "학생부위주(교과)"]))
@@ -456,7 +448,6 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
 
     similar_majors_context = "\n".join(similar_lines) if similar_lines else f"본교 내 동일 키워드 학과 합격 사례가 적어 전국 대학 [{target_track}] 계열 기준(학종·교과 통합)으로 추천하세요."
 
-    # 상위권 대학 안정권 남발 방지(Safety Cap) 지시문 생성
     top_univ_flag = is_top_competitive_univ(univ_input, major_input)
     if top_univ_flag:
         safety_cap_instruction = (
@@ -466,7 +457,7 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
             f"최대 판정 상한선은 **'🎯적정권(유력)'** 또는 **'🟡소신 경합권'**입니다."
         )
     else:
-        safety_cap_instruction = "본교 합불 통계와 보수적 안정 권장선을 기준으로 객관적으로 판정하세요."
+        safety_cap_instruction = "본교 합불 통계와 보수적 권장선을 기준으로 객관적으로 판정하세요."
 
     if target_df.empty:
         fallback_fail_info = ""
@@ -490,7 +481,6 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
             "similar_majors_context": similar_majors_context
         }
 
-    # 5) 최근연도 가중치(5:3:2) 및 합불 교차 통계 계산
     pass_df = target_df[target_df["최종단계"].isin(["합격", "충원합격"])].copy()
     fail_df = target_df[target_df["최종단계"] == "불합격"].copy()
 
@@ -502,7 +492,6 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
     w_pass_5 = calc_weighted_mean(pass_df["내신등급_5등급환산"], pass_df["연도가중치"])
     w_pass_9 = calc_weighted_mean(pass_df["내신등급"], pass_df["연도가중치"])
 
-    # 직접 매칭된 학과만의 통계도 별도 표기 (소표본 결합 시 참고용)
     exact_dept_note = ""
     if not matched_major_df.empty and len(pass_in_matched) > 0 and len(target_df) > len(matched_major_df):
         exact_w5 = calc_weighted_mean(pass_in_matched["내신등급_5등급환산"], pass_in_matched["연도가중치"])
@@ -537,7 +526,6 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
             f"- {safety_cap_instruction}"
         )
 
-    # 6) 화면 및 리포트 노출용 표 생성 (합격/충원합격만 노출)
     rows_md = []
     prompt_lines = [f"[{match_level}]", fail_prompt_note]
 
@@ -555,7 +543,7 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
             f"| **{subtype_label}** | {stage_label} | {cnt}건 | **{w_m5:.2f} 등급** *(범위: {min_5:.2f}~{max_5:.2f})* | {w_m9:.2f} 등급 *(범위: {min_9:.2f}~{max_9:.2f})* |"
         )
         prompt_lines.append(
-            f"- {subtype_label} [{stage_label}, {cnt}건]: 최근가중(5:3:2) 엄격 5등급제 환산 평균 {w_m5:.2f}등급(범위 {min_5:.2f}~{max_5:.2f}) / 9등급제 가중평균 {w_m9:.2f}등급(범위 {min_9:.2f}~{max_9:.2f})"
+            f"- {subtype_label} [{stage_label}, {cnt}건]: 최근가중(5:3:2) 5등급제 환산 평균 {w_m5:.2f}등급(범위 {min_5:.2f}~{max_5:.2f}) / 9등급제 가중평균 {w_m9:.2f}등급(범위 {min_9:.2f}~{max_9:.2f})"
         )
 
     pass_sorted = pass_df.sort_values(by=["대입학년도", "내신등급_5등급환산"], ascending=[False, True]).head(6)
@@ -563,13 +551,13 @@ def analyze_school_admission_benchmark(df, univ_input, major_input, subtype_inpu
     for _, r in pass_sorted.iterrows():
         sub_type = str(r["세부유형"]).strip() if pd.notna(r["세부유형"]) and str(r["세부유형"]).strip() else "학생부종합"
         case_lines.append(
-            f"  * [{int(r['대입학년도'])}대입] {r['모집단위']} ({sub_type} - {r['최종단계']}): **엄격 5등급환산 {r['내신등급_5등급환산']:.2f}등급** (9등급제 {r['내신등급']:.2f})"
+            f"  * [{int(r['대입학년도'])}대입] {r['모집단위']} ({sub_type} - {r['최종단계']}): **5등급환산 {r['내신등급_5등급환산']:.2f}등급** (9등급제 {r['내신등급']:.2f})"
         )
 
     table_header = (
         f"**{match_level}**\n\n"
         f"> {calibration_note_md}\n\n"
-        "| 전형 및 계열 구분 (학종 전용) | 합격단계 | 본교 합격 건수 | **최근가중(5:3:2) 엄격 5등급제 평균 (범위)** | 최근가중 9등급제 원본 평균 (범위) |\n"
+        "| 전형 및 계열 구분 (학종 전용) | 합격단계 | 본교 합격 건수 | **최근가중(5:3:2) 5등급제 평균 (범위)** | 최근가중 9등급제 원본 평균 (범위) |\n"
         "| :--- | :---: | :---: | :---: | :---: |\n"
     )
     summary_md = table_header + "\n".join(rows_md) + "\n\n**📌 본교 동일 계열 최근 학생부종합 주요 합격 사례 (최신 연도순, 불합격 비노출):**\n" + "\n".join(case_lines)
@@ -744,7 +732,7 @@ def pdf_download_component(result_text: str, title_prefix: str):
 # ==========================================
 st.title("📊 생기부 역량 평가 및 보완점 진단기")
 st.markdown(
-    "학생의 **학교생활기록부 PDF**를 업로드하면 **① 시수 반영 내신 및 엄격 보정 5등급제 환산**, "
+    "학생의 **학교생활기록부 PDF**를 업로드하면 **① 시수 반영 내신 및 5등급제 정밀 환산**, "
     "**② 동일 대학·동일 계열(인문/자연 분리) 합불 교차 보정(최근연도 5:3:2 가중)**, "
     "**③ 30개 세부 평가 요인 마스터 진단표(●) 및 강점·감점·제언 3단 심층 분석**, "
     "**④ 차기 학기 세특·창체 로드맵 및 동일 계열 추천 대학(종합·교과 통합 6선)**을 제시합니다."
@@ -950,7 +938,7 @@ if st.button("🚀 생기부 심층 진단 및 마스터 리포트 생성하기"
 
                 prompt = f"""
                 당신은 {university} {major} ({selected_subtype}, [{detected_track} 계열])의 학생부종합전형 수석 입학사정관이자 냉철한 대입 진학 지도 전문가입니다.
-                아래 제공된 [본교 최근 3개년 희망 대학·동일 계열({detected_track}) 학생부종합 합불 교차 보정 데이터(최근연도 5:3:2 가중 및 엄격 5등급제 환산 포함)], [본교 내 동일 계열({detected_track}) 타 대학 합격자 참고 데이터(종합+교과 통합)], 그리고 비식별화된 [학생 생활기록부 추출 내용]을 정밀 분석하여 **점수 인플레이션(칭찬 편향)이 완전히 배제된 냉정하고 객관적인 입학사정관 종합 진단 리포트**를 작성하세요.
+                아래 제공된 [본교 최근 3개년 희망 대학·동일 계열({detected_track}) 학생부종합 합불 교차 보정 데이터(최근연도 5:3:2 가중 및 정밀 5등급제 환산 포함)], [본교 내 동일 계열({detected_track}) 타 대학 합격자 참고 데이터(종합+교과 통합)], 그리고 비식별화된 [학생 생활기록부 추출 내용]을 정밀 분석하여 **점수 인플레이션(칭찬 편향)이 완전히 배제된 냉정하고 객관적인 입학사정관 종합 진단 리포트**를 작성하세요.
 
                 [핵심 지시사항 1: 현재 기록된 학기 자동 감지 및 '동일 계열({detected_track}) 합불 보정' 기반의 엄격한 성적 판정]
                 - 업로드된 생기부 교과학습발달상황 표를 확인하여, 성적(석차등급)이 실제로 산출되어 있는 학기까지만 자동으로 감지하세요.
@@ -961,7 +949,7 @@ if st.button("🚀 생기부 심층 진단 및 마스터 리포트 생성하기"
                   1) 특정 학과의 합격자가 1~2건뿐일 때 그 1건만 보고 합격률 100%라거나 '안정권'이라고 판정하는 것을 절대 금지합니다! 제공된 **동일 대학 [{detected_track}] 계열 전체의 실질 합격률(%)과 불합격자 상위권 성적, 보수적 권장선**을 기준으로 판정하세요.
                   2) 특히 서울·수도권 주요 상위권 대학(서·연·고·서·성·한·중·경·외·시·이·건·동·홍·숙 등) 및 의약학 계열의 학생부종합전형은 일반고에서 서류·면접 변수가 매우 크므로, 내신이 아무리 높아도 **절대 '🟢안정권'으로 판정하지 마세요! (최대 상한선: '🎯적정권' 또는 '🟡소신 경합권')**
 
-                [핵심 지시사항 2: 점수 인플레이션(후한 채점) 방지용 '엄격 감점 루브릭(Strict Rubric)']
+                [핵심 지시사항 2: 점수 인플레이션 방지용 '엄격 감점 루브릭(Strict Rubric)']
                 - 적용된 반영 기준: {weight_desc} (학업역량 {w_acad}% : 진로역량 {w_career}% : 공동체역량 {w_comm}%)
                 - 9개 핵심 지표를 10점 만점으로 채점할 때 **9.3~9.8점 남발(점수 퍼주기)을 절대 금지**합니다! 아래 강제 감점 기준을 엄격히 적용하세요:
                   * **강제 감점 규칙 A (지필 성적 약점)**: 국·영·수·사·과 주요 과목 중 2등급 이하가 있거나 원점수가 85점 미만(특히 70점대~80점대 초반)인 과목이 1개라도 존재하면, [1. 학업성취도] 및 [5. 전공 관련 교과 성취도] 점수는 **최대 8.2 ~ 8.8점 이하**로 엄격히 제한하세요.
@@ -1081,7 +1069,7 @@ if st.button("🚀 생기부 심층 진단 및 마스터 리포트 생성하기"
                 ## 🧭 6. 현재 학생 상황 맞춤 [{detected_track}] 계열 추천 대학 및 유사 학과 포트폴리오 (학종·교과 통합 6선)
                 > - **희망 대학([{university} {major} - {selected_subtype}]) 적합도 및 수시 6장 전형 전략 총평**: (현재 학생의 5등급제 내신과 생기부 역량을 종합할 때 희망 대학 지원이 적절한지, 그리고 학생부종합전형과 학생부교과전형 중 어떤 비중으로 수시 6장 포트폴리오를 짜는 것이 유리한지 2~3문장으로 진단)
 
-                | 지원 전략 구분 | 추천 대학명 (캠퍼스 명시) | 추천 모집단위 ({detected_track} 동일·유사 학과) | 추천 전형유형 (학생부종합 / 교과) | 예상 합격권 (엄격 5등급제 기준) | 학생 생기부·내신 기준 전형별 추천 사유 및 유불리 분석 |
+                | 지원 전략 구분 | 추천 대학명 (캠퍼스 명시) | 추천 모집단위 ({detected_track} 동일·유사 학과) | 추천 전형유형 (학생부종합 / 교과) | 예상 합격권 (5등급제 환산 기준) | 학생 생기부·내신 기준 전형별 추천 사유 및 유불리 분석 |
                 | :---: | :--- | :--- | :---: | :---: | :--- |
                 | **🚀 상향·소신** | (대학 1) | (유사 학과명) | 학생부종합 / 교과 중 유리한 전형 명시 | 약 O.OO ~ O.OO 등급 | (학생의 어떤 세특 강점 또는 내신 구조로 도전 가능한지 구체적 이유) |
                 | **🚀 상향·소신** | (대학 2) | (유사 학과명) | 학생부종합 / 교과 중 유리한 전형 명시 | 약 O.OO ~ O.OO 등급 | (구체적 추천 이유 및 보완 조건) |
